@@ -1,0 +1,30 @@
+<!--%Tag(FULL)%-->
+
+<launch>
+    <arg name="frame_id" default="imu"/>
+
+    <arg name="frame_local" default="ENU"/>
+
+
+
+	<node pkg="tf" type="static_transform_publisher" name="static_tf_imu" args="0 0 0.1 0 0 0 1 base_link imu 100" />
+	<node pkg="tf" type="static_transform_publisher" name="static_tf_prism" args="0 0 1 0 0 0 1 base_link prism 100" />
+
+
+	<node pkg="xsens_driver" type="mtnode.py" name="xsens_driver" output="screen" >
+		<param name="frame_id" value="$(arg frame_id)"/>
+
+		<param name="frame_local" value="$(arg frame_local)"/>
+		
+		<param name="device" value="/dev/ttyUSB0"/>
+		
+	</node>
+
+	<node pkg="serial_test" type="serial_test_node" name="indoor_rtk_node" args="/dev/ttyUSB1 9600" />
+
+
+
+
+
+
+</launch>

@@ -1,0 +1,401 @@
+/***
+ * This example expects the serial port has a loopback on it.
+ *
+ * Alternatively, you could use an Arduino:
+ *
+ * <pre>
+ *  void setup() {
+ *    Serial.begin(<insert your baudrate here>);
+ *  }
+ *
+ *  void loop() {
+ *    if (Serial.available()) {
+ *      Serial.write(Serial.read());
+ *    }
+ *  }
+ * </pre>
+ */
+
+#include <ros/ros.h>
+#include <tf/transform_broadcaster.h>
+#include <tf/transform_listener.h>
+#include <nav_msgs/Odometry.h>
+
+#include <string>
+#include <iostream>
+#include <cstdio>
+
+// OS Specific sleep
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
+
+#include "serial/serial.h"
+
+using std::string;
+using std::exception;
+using std::cout;
+using std::cerr;
+using std::endl;
+using std::vector;
+
+
+
+void enumerate_ports()
+{
+	vector<serial::PortInfo> devices_found = serial::list_ports();
+
+	vector<serial::PortInfo>::iterator iter = devices_found.begin();
+
+	while( iter != devices_found.end() )
+	{
+		serial::PortInfo device = *iter++;
+
+		printf( "(%s, %s, %s)\n", device.port.c_str(), device.description.c_str(), device.hardware_id.c_str() );
+	}
+}
+
+void print_usage()
+{
+  cerr << "Usage: test_serial {-e|<serial port address>} ";
+  cerr << "<baudrate>" << endl;
+}
+
+int run(int argc, char **argv)
+{
+
+  if(argc < 2) {
+	  print_usage();
+    return 0;
+  }
+
+  // Argument 1 is the serial port or enumerate flag
+  string port(argv[1]);
+
+  if( port == "-e" ) {
+	  enumerate_ports();
+	  return 0;
+  }
+  else if( argc < 3 ) {
+	  print_usage();
+	  return 1;
+  }
+
+  // Argument 2 is the baudrate
+  unsigned long baud = 0;
+// #if defined(WIN32) && !defined(__MINGW32__)
+//  sscanf_s(argv[2], "%lu", &baud);
+//#else
+  sscanf(argv[2], "%lu", &baud);
+//#endif
+
+  ros::NodeHandle n;
+  tf::TransformBroadcaster transform_broadcaster;
+  tf::TransformListener listener;
+  ros::Publisher odom_pub;
+  ros::Rate rate(1);
+  odom_pub = n.advertise<nav_msgs::Odometry>("/odometry/indoor_rtk", 1);
+
+  // port, baudrate, timeout in milliseconds
+  serial::Serial my_serial(port, baud, serial::Timeout::simpleTimeout(2000));
+
+  cout << "Is the serial port open?";
+  if(my_serial.isOpen())
+    cout << " Yes." << endl;
+  else
+    cout << " No." << endl;
+
+
+  // declare some stuff
+  string delimiter_1 = ":";
+  string delimiter_2 = ",";
+  size_t pos = 0;
+
+
+  // enter loop
+  while (ros::ok()) {
+
+
+	// for storing coordinates
+    double coordinates[8];
+
+	my_serial.flush();
+	my_serial.write("%R1Q,2082:500,1\r\n");
+
+	if (my_serial.waitReadable())
+	{
+
+		string input = my_serial.readline(1000, "\r\n");
+
+		//string input = "%R1P,0,0:1285,4.171101398787006,-3.298025825649888,-0.294882080940466,95182,4.171097966262274,-3.298030166851005,-0.294924192611223,98360\r\n";
+
+
+		ros::Time input_time = ros::Time::now();
+
+
+		//remove carriage return and newline
+		input.erase(input.length()-2,input.length());
+
+
+
+		// Get response code from input
+		string response_msg;
+		pos = input.find(delimiter_1);
+		response_msg = input.substr(0, pos);
+		input.erase(0, pos + delimiter_1.length());
+		pos = input.find(delimiter_2);
+		response_msg.append(input.substr(0, pos));
+		input.erase(0, pos + delimiter_2.length());
+		cout << "Leica responded: " << response_msg << endl;
+
+
+		// Get coordinates from input
+		std::stringstream input_stream(input);
+		string token;
+
+		int counter = 0;
+		while(std::getline(input_stream, token, ','))
+		{
+			std::stringstream convert(token);
+			convert >> coordinates[counter];
+			counter++;
+
+		}
+
+
+
+
+		// Get coordinates from input
+		while (pos != string::npos)
+		{
+			pos = input.find(delimiter_2);
+			std::stringstream convert(input.substr(0,pos));
+			convert >> coordinates[counter];
+			input.erase(0, pos + delimiter_2.length());
+			counter++;
+		}
+
+
+
+		//debug
+		cout.precision(17);
+		for(int i=0;i<8;i++)
+			cout << coordinates[i] << ", ";
+		cout << endl;
+
+
+		// create prism in ENU transform
+		tf::Transform transform_ENU_prism;
+		transform_ENU_prism.setOrigin( tf::Vector3(coordinates[0], coordinates[1], coordinates[2]));
+		tf::Quaternion quat;
+		quat.setRPY(0, 0, 0);
+		transform_ENU_prism.setRotation(quat);
+
+		// ask ros for prism in base_link transform
+		tf::StampedTransform transform_base_link_prism;
+
+
+
+
+		try{
+			listener.waitForTransform("base_link", "prism", ros::Time(0), ros::Duration(3.0));
+			listener.lookupTransform("base_link", "prism",
+					ros::Time(0), transform_base_link_prism);
+		}
+		catch (tf::TransformException &ex){
+			ROS_ERROR("%s",ex.what());
+			ros::Duration(1.0).sleep();
+		}
+
+		// calculate base_link in ENU transform
+		tf::Transform transform_base_link_ENU;
+		transform_base_link_ENU =   transform_ENU_prism * transform_base_link_prism.inverse();
+
+		transform_base_link_ENU =   transform_base_link_prism * transform_ENU_prism.inverse();
+
+		tf::Transform transform_ENU_base_link = transform_base_link_ENU.inverse();
+		tf::StampedTransform transform_ENU_base_link_stamped(transform_ENU_base_link, input_time, "ENU", "base_link");
+
+		//transform_broadcaster.sendTransform(transform_ENU_base_link_stamped);
+
+
+
+		// create and populate odometry_msg
+		nav_msgs::Odometry odom_msg;
+		odom_msg.header.stamp = input_time;
+		odom_msg.header.frame_id = "ENU";
+		odom_msg.child_frame_id = "base_link";
+		odom_msg.pose.pose.position.x = transform_ENU_base_link.getOrigin().getX();
+		odom_msg.pose.pose.position.y = transform_ENU_base_link.getOrigin().getY();
+		odom_msg.pose.pose.position.z = transform_ENU_base_link.getOrigin().getZ();
+		boost::array<double, 36ul> cov = {   0.2,0,0,0,0,0,
+										   0,0.2,0,0,0,0,
+										   0,0,0.2,0,0,0,
+										   0,0,0,0.2,0,0,
+										   0,0,0,0,0.2,0,
+										   0,0,0,0,0,0.2};
+		odom_msg.pose.covariance = cov;
+
+		// publish odometry
+		odom_pub.publish(odom_msg);
+
+		// sleep
+
+	}
+	else
+	{
+		ROS_WARN("Leica is not responding");
+
+	}
+
+	rate.sleep();
+
+
+	/*
+	ros::Time start_time = ros::Time::now();
+	double coordinates[3];
+	bool writing = false;
+	my_serial.flushInput();
+	my_serial.write("%R1Q,2082:500,1\r\n");
+
+	//%R1P,0,0:1285,4.171101398787006,-3.298025825649888,-0.294882080940466,95182,4.171097966262274,-3.298030166851005,-0.294924192611223,98360
+
+
+	//while(my_serial.available()<1)
+	//{
+	//	cout << "waiting" << endl;
+	//}
+
+	// read next byte
+	letter = my_serial.read(1);
+
+
+	//debug
+	ros::Time timeout = ros::Time::now();
+
+
+	//do until new line
+	while(letter != "\r" && ros::ok())
+	{
+
+		letter = my_serial.read(1);
+		cout << letter << endl;
+
+		if (letter == ".")
+		{
+			dot_count ++;
+			//writing = false;
+		}
+		else if (letter == " ")
+		{
+			if (writing)
+			{
+				cout << "result: " << result << endl;
+				result.erase(0,2);
+
+				std::stringstream convert(result);
+				convert >> coordinates[current_coordinate];
+				cout << "coordinate " << current_coordinate << ": " << coordinates[current_coordinate] << endl;
+				result = "";
+				current_coordinate++;
+			}
+
+			writing = false;
+
+		}
+		else
+		{
+			if (dot_count == 2)
+			{
+				writing = true;
+				//cout << current_coordinate << endl;
+			}
+
+			if (writing)
+			{
+				result.append(letter);
+				cout << "appending: " << letter << endl;
+			}
+
+			dot_count = 0;
+		}
+
+		// if we have all three coordinates, publish them to ROS and reset counter
+		if (current_coordinate == 3)
+		{
+		  cout << "coordinates received: [" << coordinates[0] << "," << coordinates[1] << "," << coordinates[2] << "]" << endl;
+		  tf::Transform transform_ENU_prism;
+
+		  transform_ENU_prism.setOrigin( tf::Vector3(coordinates[0]/1000, coordinates[1]/1000, coordinates[2]/1000));
+		  tf::Quaternion quat;
+		  quat.setRPY(0, 0, 0);
+		  transform_ENU_prism.setRotation(quat);
+
+
+		  tf::StampedTransform transform_base_link_prism;
+		  ros::Time now = ros::Time::now();
+		  try{
+
+			listener.waitForTransform("base_link", "prism", now, ros::Duration(3.0));
+		    listener.lookupTransform("base_link", "prism",
+		  						     now, transform_base_link_prism);
+		  }
+		  catch (tf::TransformException ex){
+		    ROS_ERROR("%s",ex.what());
+		    ros::Duration(1.0).sleep();
+		  }
+		  tf::Transform transform_base_link_ENU;
+		  transform_base_link_ENU =   transform_ENU_prism * transform_base_link_prism.inverse();
+
+
+		  nav_msgs::Odometry odom_msg;
+		  odom_msg.header.stamp = now;
+		  odom_msg.header.frame_id = "ENU";
+		  odom_msg.child_frame_id = "base_link";
+		  odom_msg.pose.pose.position.x =   transform_base_link_ENU.getOrigin().getX(); //coordinates[0]/1000;
+		  odom_msg.pose.pose.position.y = transform_base_link_ENU.getOrigin().getY();//coordinates[1]/1000;
+		  odom_msg.pose.pose.position.z = transform_base_link_ENU.getOrigin().getZ();//coordinates[2]/1000;
+		  boost::array<double, 36ul> cov = {   0.2,0,0,0,0,0,
+		                                       0,0.2,0,0,0,0,
+		                                       0,0,0.2,0,0,0,
+		                                       0,0,0,0.2,0,0,
+		                                       0,0,0,0,0.2,0,
+		                                       0,0,0,0,0,0.2};
+		  odom_msg.pose.covariance = cov;
+		  odom_pub.publish(odom_msg);
+
+
+
+
+		  current_coordinate = 0;
+		}
+
+
+
+	}
+	//rate.sleep();
+	ros::Duration duration_timeout = timeout - start_time;
+	ros::Duration duration = ros::Time::now() - start_time;
+	cout << "timeout: " << duration_timeout.toSec() << endl;
+	cout << "time: " << duration.toSec() << endl;
+
+*/
+    
+  }
+
+
+  return 0;
+}
+
+int main(int argc, char **argv) {
+  ros::init(argc, argv, "serial_test_node");
+
+
+  try {
+    return run(argc, argv);
+  } catch (exception &e) {
+    cerr << "Unhandled Exception: " << e.what() << endl;
+  }
+}
