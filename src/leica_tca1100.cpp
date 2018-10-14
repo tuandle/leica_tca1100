@@ -188,7 +188,7 @@ void LeicaTCA1100::publishPosition() {
     tf::Transform tf_Leica_base_link;
     // bring it to base_link
     tf_Leica_base_link.setOrigin(transform_ENU_prism.getOrigin() +
-                                 transform_base_link_prism.getOrigin());
+                                 transform_base_link_prism.inverse().getOrigin());
     // no need to rotate because prism and base_link don't have rotation
     tf_Leica_base_link.setRotation(transform_ENU_prism.getRotation() *
                                    Rotation_q);
