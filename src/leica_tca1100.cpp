@@ -5,6 +5,7 @@
  */
 
 // ros includes
+#include <geometry_msgs/PoseStamped.h>
 #include <nav_msgs/Odometry.h>
 #include <ros/ros.h>
 #include <tf/transform_broadcaster.h>
@@ -24,7 +25,8 @@ class LeicaTCA1100 {
   tf::TransformBroadcaster transform_broadcaster_;
   tf::TransformListener tf_listener_;
   ros::Publisher odom_prism_pub_;
-  ros::Publisher odom_base_link_pub_, groundtruth_pub;
+  ros::Publisher odom_base_link_pub_, groundtruth_prism_pub,
+      groundtruth_base_link_pub;
 
   // int update_rate_;
 };
@@ -33,10 +35,13 @@ LeicaTCA1100::LeicaTCA1100(std::string port, unsigned long baud) {
   // update_rate_ = 1;
   /// ros::Rate rate(update_rate_);
   odom_prism_pub_ =
-      n_.advertise<nav_msgs::Odometry>("/odometry/leica_prism", 1);
+      n_.advertise<nav_msgs::Odometry>("/odometry/leica_prism", 1000);
   odom_base_link_pub_ =
-      n_.advertise<nav_msgs::Odometry>("/odometry/leica_base_link", 1);
-  groundtruth_pub = n_.advertise<nav_msgs::Odometry>("/groundtruth", 1);
+      n_.advertise<nav_msgs::Odometry>("/odometry/leica_base_link", 1000);
+  groundtruth_prism_pub =
+      n_.advertise<geometry_msgs::PoseStamped>("/groundtruth_prism", 1000);
+  groundtruth_base_link_pub =
+      n_.advertise<geometry_msgs::PoseStamped>("/groundtruth_base_link", 1000);
   setupSerial(port, baud);
 }
 
@@ -151,7 +156,7 @@ void LeicaTCA1100::publishPosition() {
         transform_ENU_base_link, input_time, "ENU", "base_link");
 
     // broadcast tf directly
-    transform_broadcaster_.sendTransform(transform_ENU_base_link_stamped);
+    /*transform_broadcaster_.sendTransform(transform_ENU_base_link_stamped);*/
 
     // Convert Leica's Northing/Easting coordinate to ENU REP-105
     tf::Quaternion Rotation_q;
@@ -161,17 +166,43 @@ void LeicaTCA1100::publishPosition() {
     tf_Leica_map.setOrigin(transform_ENU_prism.getOrigin());
     tf_Leica_map.setRotation(transform_ENU_prism.getRotation() * Rotation_q);
     tf::StampedTransform tf_Leica_map_stamped(tf_Leica_map, input_time, "ENU",
-                                              "groundtruth");
-    transform_broadcaster_.sendTransform(tf_Leica_map_stamped);
+                                              "groundtruth_prism");
+    /*transform_broadcaster_.sendTransform(tf_Leica_map_stamped);*/
 
-    nav_msgs::Odometry groundtruth_msg;
+    /*nav_msgs::Odometry groundtruth_msg;
     groundtruth_msg.header.stamp = input_time;
     groundtruth_msg.header.frame_id = "map";
     groundtruth_msg.child_frame_id = "prism";
     groundtruth_msg.pose.pose.position.x = tf_Leica_map.getOrigin().getY();
     groundtruth_msg.pose.pose.position.y = -tf_Leica_map.getOrigin().getX();
     groundtruth_msg.pose.pose.position.z = tf_Leica_map.getOrigin().getZ();
-    groundtruth_pub.publish(groundtruth_msg);
+    groundtruth_pub.publish(groundtruth_msg);*/
+
+    geometry_msgs::PoseStamped groundtruth_prism_msg;
+    groundtruth_prism_msg.header.stamp = input_time;
+    groundtruth_prism_msg.pose.position.x = tf_Leica_map.getOrigin().getY();
+    groundtruth_prism_msg.pose.position.y = -tf_Leica_map.getOrigin().getX();
+    groundtruth_prism_msg.pose.position.z = tf_Leica_map.getOrigin().getZ();
+    groundtruth_prism_pub.publish(groundtruth_prism_msg);
+
+    tf::Transform tf_Leica_base_link;
+    // bring it to base_link
+    tf_Leica_base_link.setOrigin(transform_ENU_prism.getOrigin() +
+                                 transform_base_link_prism.getOrigin());
+    // no need to rotate because prism and base_link don't have rotation
+    tf_Leica_base_link.setRotation(transform_ENU_prism.getRotation() *
+                                   Rotation_q);
+    tf::StampedTransform tf_Leica_base_link_stamped(
+        tf_Leica_base_link, input_time, "ENU", "groundtruth_base_link");
+    geometry_msgs::PoseStamped groundtruth_base_link_msg;
+    groundtruth_base_link_msg.header.stamp = input_time;
+    groundtruth_base_link_msg.pose.position.x =
+        tf_Leica_base_link.getOrigin().getY();
+    groundtruth_base_link_msg.pose.position.y =
+        -tf_Leica_base_link.getOrigin().getX();
+    groundtruth_base_link_msg.pose.position.z =
+        tf_Leica_base_link.getOrigin().getZ();
+    groundtruth_base_link_pub.publish(groundtruth_base_link_msg);
 
     // create and populate prism odometry_msg
     nav_msgs::Odometry prism_odom_msg;
